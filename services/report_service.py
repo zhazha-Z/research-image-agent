@@ -8,7 +8,10 @@ from services.mock_analysis import DISCLAIMER
 from services.rag_service import get_literature_references
 
 
-def generate_markdown_report(analysis_result: Dict[str, object]) -> str:
+def generate_markdown_report(
+    analysis_result: Dict[str, object],
+    chat_history: list[Dict[str, str]] | None = None,
+) -> str:
     """Generate a structured Markdown experiment report from mock analysis output."""
     analysis_mode = analysis_result.get("analysis_mode", "mock 分析")
     metrics = analysis_result.get("metrics", [])

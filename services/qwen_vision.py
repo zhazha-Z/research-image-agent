@@ -23,7 +23,11 @@ QWEN_VISION_PROMPT = """
 3. 不确定的地方要明确说明。
 4. 输出严格 JSON，不要输出 Markdown，不要输出代码块。
 5. JSON 必须包含以下字段：
+   - image_type：图像类型，例如 细胞显微图像、荧光显微图像、分割结果图、loss 曲线图、其他科研实验图像
+   - image_type_confidence：图像类型判断置信度，0 到 1 之间的小数
    - image_summary：图像整体描述，字符串
+   - analysis_focus：建议分析重点，数组
+   - metric_explanation_mode：指标解释模式，只能从 segmentation、curve、fluorescence、phenotype、general_quality 中选择一个
    - visible_structures：图像中可见结构，数组
    - possible_abnormal_regions：疑似异常区域，数组
    - quality_notes：图像质量说明，数组
@@ -49,7 +53,7 @@ def analyze_image_with_qwen(uploaded_file: Any) -> Dict[str, Any]:
 
         image_data_url = _uploaded_file_to_data_url(uploaded_file)
         client = OpenAI(
-            api_key=os.getenv("DASHSCOPE_API_KEY"),
+            api_key=api_key,
             base_url=DASHSCOPE_BASE_URL,
         )
         completion = client.chat.completions.create(
@@ -139,11 +143,22 @@ def _parse_qwen_json(raw_text: str) -> Dict[str, Any]:
     try:
         parsed = json.loads(cleaned_text)
     except json.JSONDecodeError:
-        return _wrap_raw_text(raw_text)
+        extracted_text = _extract_json_object_text(cleaned_text)
+        if not extracted_text:
+            return _wrap_raw_text(raw_text)
+        try:
+            parsed = json.loads(extracted_text)
+        except json.JSONDecodeError:
+            return _wrap_raw_text(raw_text)
 
     if not isinstance(parsed, dict):
         return _wrap_raw_text(raw_text)
 
+    parsed["image_summary"] = str(parsed.get("image_summary") or "千问未返回图像整体描述。")
+    parsed["image_type"] = str(parsed.get("image_type") or "")
+    parsed["image_type_confidence"] = _ensure_float(parsed.get("image_type_confidence"))
+    parsed["analysis_focus"] = _ensure_list(parsed.get("analysis_focus"))
+    parsed["metric_explanation_mode"] = str(parsed.get("metric_explanation_mode") or "")
     parsed["visible_structures"] = _ensure_list(parsed.get("visible_structures"))
     parsed["possible_abnormal_regions"] = _ensure_list(parsed.get("possible_abnormal_regions"))
     parsed["quality_notes"] = _ensure_list(parsed.get("quality_notes"))
@@ -155,7 +170,11 @@ def _parse_qwen_json(raw_text: str) -> Dict[str, Any]:
 
 def _wrap_raw_text(raw_text: str) -> Dict[str, Any]:
     return {
+        "image_type": "未明确识别",
+        "image_type_confidence": 0.0,
         "image_summary": raw_text or "千问返回了空文本，无法解析为结构化 JSON。",
+        "analysis_focus": [],
+        "metric_explanation_mode": "general_quality",
         "visible_structures": [],
         "possible_abnormal_regions": [],
         "quality_notes": ["模型返回内容不是合法 JSON，已保留原始文本供人工查看。"],
@@ -177,12 +196,51 @@ def _strip_code_fence(text: str) -> str:
     return text
 
 
+def _extract_json_object_text(text: str) -> str:
+    start_index = text.find("{")
+    if start_index < 0:
+        return ""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start_index, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start_index : index + 1]
+
+    return ""
+
+
 def _ensure_list(value: Any) -> List[str]:
     if value is None:
         return []
     if isinstance(value, list):
         return [str(item) for item in value]
     return [str(value)]
+
+
+def _ensure_float(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(number, 1.0))
 
 
 def _uploaded_file_to_data_url(uploaded_file: Any) -> str:
