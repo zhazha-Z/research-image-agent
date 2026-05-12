@@ -11,6 +11,7 @@ from services.rag_service import get_literature_references
 def generate_markdown_report(
     analysis_result: Dict[str, object],
     chat_history: list[Dict[str, str]] | None = None,
+    segmentation_result: Dict[str, object] | None = None,
 ) -> str:
     """Generate a structured Markdown experiment report from mock analysis output."""
     analysis_mode = analysis_result.get("analysis_mode", "mock 分析")
@@ -37,6 +38,7 @@ def generate_markdown_report(
         f"- **{item['method']}**：{item['summary']} 参考：{item['title']}。"
         for item in references
     )
+    segmentation_section = _format_segmentation_section(segmentation_result)
 
     return f"""# 科研图像智能分析实验报告
 
@@ -86,6 +88,8 @@ def generate_markdown_report(
 
 {limitation_lines}
 
+{segmentation_section}
+
 ---
 
 {DISCLAIMER}
@@ -99,3 +103,21 @@ def _format_metric_line(metric: Dict[str, object]) -> str:
         f"- **{metric['name']} = {value_text}**："
         f"{metric['explanation']} {metric['interpretation']}"
     )
+
+
+def _format_segmentation_section(segmentation_result: Dict[str, object] | None) -> str:
+    if not segmentation_result or not segmentation_result.get("success"):
+        return ""
+
+    stats = segmentation_result.get("area_statistics", {})
+    return f"""
+## 基础分割与面积统计
+
+- 分割方法：{segmentation_result.get("segmentation_method", "未知方法")}
+- 目标数量：{segmentation_result.get("object_count", 0)}
+- 平均面积：{float(stats.get("mean_area", 0.0)):.2f}
+- 最小面积：{stats.get("min_area", 0)}
+- 最大面积：{stats.get("max_area", 0)}
+- 总面积：{stats.get("total_area", 0)}
+- 局限性：{segmentation_result.get("limitations", "当前分割为基础阈值方法，需要人工标注或专业模型进一步验证。")}
+"""

@@ -2,3 +2,5 @@ streamlit>=1.36.0
 pillow>=10.0.0
 openai>=1.68.0
 python-dotenv>=1.0.0
+numpy>=1.23.0
+scikit-image>=0.22.0

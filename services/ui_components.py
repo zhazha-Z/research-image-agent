@@ -8,12 +8,20 @@ import streamlit as st
 from PIL import Image
 
 from services.agent_orchestrator import (
-    agent_result_to_app_result,
     run_image_analysis_agent,
     run_qa_agent,
     run_report_agent,
 )
-from services.mock_analysis import DISCLAIMER
+from services.export_service import (
+    export_analysis_json,
+    export_area_statistics_csv,
+    save_mask_image,
+    sanitize_filename,
+)
+from services.segmentation_service import run_basic_segmentation
+
+
+DISCLAIMER = "仅用于科研辅助分析，不构成医学诊断。"
 
 
 def init_state() -> None:
@@ -26,6 +34,10 @@ def init_state() -> None:
         st.session_state.chat_history = []
     if "report_markdown" not in st.session_state:
         st.session_state.report_markdown = ""
+    if "segmentation_result" not in st.session_state:
+        st.session_state.segmentation_result = None
+    if "segmentation_error" not in st.session_state:
+        st.session_state.segmentation_error = ""
 
 
 def render_header() -> None:
@@ -65,14 +77,12 @@ def render_analysis_section(uploaded_file: object | None, image: Image.Image | N
     if st.button("开始 AI 分析", type="primary", disabled=disabled, use_container_width=True):
         st.session_state.analysis_error = ""
         st.session_state.report_markdown = ""
+        st.session_state.segmentation_result = None
+        st.session_state.segmentation_error = ""
         with st.spinner("Agent 正在识别图像类型、选择分析路径并生成结构化反馈..."):
             agent_response = run_image_analysis_agent(uploaded_file)
         if agent_response.get("success"):
-            st.session_state.analysis_result = agent_result_to_app_result(
-                agent_response["analysis_result"],
-                file_name=uploaded_file.name,
-                image_size=image.size,
-            )
+            st.session_state.analysis_result = agent_response["analysis_result"]
             st.success("Agent 图像分析完成。")
         else:
             st.session_state.analysis_error = agent_response.get("error", "Agent 图像分析失败。")
@@ -138,6 +148,10 @@ def render_analysis_section(uploaded_file: object | None, image: Image.Image | N
     st.markdown("#### 安全提示")
     st.warning(result.get("disclaimer") or DISCLAIMER)
 
+    _render_analysis_export(result)
+
+    _render_segmentation_section(uploaded_file, image, result)
+
 
 def render_qa_section() -> None:
     st.subheader("3. 追问与本地知识库")
@@ -177,6 +191,7 @@ def render_report_section() -> None:
         report_response = run_report_agent(
             st.session_state.analysis_result,
             chat_history=st.session_state.chat_history,
+            segmentation_result=st.session_state.segmentation_result,
         )
         if report_response.get("success"):
             st.session_state.report_markdown = report_response["report_markdown"]
@@ -195,6 +210,25 @@ def render_report_section() -> None:
         mime="text/markdown",
         use_container_width=True,
     )
+
+
+def _render_analysis_export(analysis_result: dict) -> None:
+    st.markdown("#### 结果归档")
+    file_prefix = _get_file_prefix(analysis_result)
+    json_path = export_analysis_json(
+        analysis_result,
+        chat_history=st.session_state.chat_history,
+        segmentation_result=st.session_state.segmentation_result,
+        file_prefix=file_prefix,
+    )
+    with open(json_path, "rb") as file:
+        st.download_button(
+            label="下载完整分析结果 JSON",
+            data=file,
+            file_name=f"{file_prefix}_analysis_result.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
 
 def _render_agent_decision(result: dict) -> None:
@@ -222,3 +256,81 @@ def _render_agent_decision(result: dict) -> None:
                 st.markdown(f"- {item}")
         else:
             st.markdown(f"- {next_steps}")
+
+
+def _render_segmentation_section(
+    uploaded_file: object | None,
+    image: Image.Image | None,
+    analysis_result: dict,
+) -> None:
+    st.markdown("#### 基础图像分割与统计")
+    if not analysis_result.get("can_run_segmentation"):
+        st.info("当前图像类型不适合进行细胞分割统计。")
+        if analysis_result.get("segmentation_recommended_reason"):
+            st.caption(analysis_result["segmentation_recommended_reason"])
+        return
+
+    st.caption(analysis_result.get("segmentation_recommended_reason", "可尝试基础阈值分割进行初步统计。"))
+    if st.button("运行基础图像分割与统计", disabled=uploaded_file is None, use_container_width=True):
+        st.session_state.segmentation_error = ""
+        with st.spinner("正在运行 Otsu 阈值分割和连通域统计..."):
+            segmentation_result = run_basic_segmentation(uploaded_file)
+        if segmentation_result.get("success"):
+            st.session_state.segmentation_result = segmentation_result
+        else:
+            st.session_state.segmentation_result = None
+            st.session_state.segmentation_error = segmentation_result.get("error", "基础分割失败。")
+
+    if st.session_state.segmentation_error:
+        st.error(st.session_state.segmentation_error)
+
+    if not st.session_state.segmentation_result:
+        return
+
+    segmentation_result = st.session_state.segmentation_result
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**原图**")
+        if image is not None:
+            st.image(image, use_container_width=True)
+    with col_b:
+        st.markdown("**Mask 图**")
+        st.image(segmentation_result["mask_image"], use_container_width=True)
+
+    stats = segmentation_result["area_statistics"]
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("目标数量", segmentation_result["object_count"])
+    metric_cols[1].metric("平均面积", f"{stats['mean_area']:.1f}")
+    metric_cols[2].metric("最小面积", stats["min_area"])
+    metric_cols[3].metric("最大面积", stats["max_area"])
+    st.metric("总面积", stats["total_area"])
+    st.markdown(f"**分割方法**：{segmentation_result['segmentation_method']}")
+    st.warning(segmentation_result["limitations"])
+    _render_segmentation_exports(segmentation_result, analysis_result)
+
+
+def _render_segmentation_exports(segmentation_result: dict, analysis_result: dict) -> None:
+    file_prefix = _get_file_prefix(analysis_result)
+    mask_path = save_mask_image(segmentation_result["mask_image"], file_prefix)
+    csv_path = export_area_statistics_csv(segmentation_result, file_prefix)
+    col_a, col_b = st.columns(2)
+    with open(mask_path, "rb") as file:
+        col_a.download_button(
+            label="下载分割 Mask 图",
+            data=file,
+            file_name=f"{file_prefix}_mask.png",
+            mime="image/png",
+            use_container_width=True,
+        )
+    with open(csv_path, "rb") as file:
+        col_b.download_button(
+            label="下载面积统计 CSV",
+            data=file,
+            file_name=f"{file_prefix}_area_statistics.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
+def _get_file_prefix(analysis_result: dict) -> str:
+    return sanitize_filename(str(analysis_result.get("file_name", "analysis")).rsplit(".", 1)[0])

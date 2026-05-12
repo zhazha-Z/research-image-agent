@@ -19,6 +19,7 @@
     ├── mock_analysis.py
     ├── agent_orchestrator.py
     ├── metrics_service.py
+    ├── export_service.py
     ├── qwen_vision.py
     ├── rag_service.py
     ├── report_service.py
@@ -32,7 +33,8 @@
 - `services/ui_components.py`：页面区块渲染，包括上传预览、分析展示、追问和报告区。
 - `services/agent_orchestrator.py`：编排图像类型识别、分析路径选择、指标解释模式选择和结构化结果反馈。
 - `services/metrics_service.py`：按分割、曲线、荧光、表型和通用质量模式提供指标解释。
-- `services/mock_analysis.py`：本地演示结果生成器，仅用于开发调试和 AI 调用失败时的页面预览兜底。
+- `services/export_service.py`：导出 Markdown 报告配套结果、分割 mask、面积统计 CSV 和完整分析 JSON。
+- `services/mock_analysis.py`：本地演示结果生成器，仅保留给开发调试使用，正式页面不直接调用。
 - `services/qwen_vision.py`：通过 DashScope OpenAI 兼容接口调用千问图像理解模型。
 - `services/rag_service.py`：读取 `knowledge_base/` 下的 markdown 文件，提供本地知识库关键词检索和追问回答。
 - `services/report_service.py`：根据分析结果生成 Markdown 实验报告。
@@ -83,7 +85,7 @@ export QWEN_VISION_MODEL=qwen-vl-plus
 streamlit run app.py
 ```
 
-启动后在浏览器中打开 Streamlit 提供的本地地址，上传 JPG 或 PNG 图像，然后点击“开始 AI 分析”即可体验完整流程。当前页面默认调用千问 AI 图像分析；没有配置 `DASHSCOPE_API_KEY` 时，真实分析无法使用，页面会提示错误原因，并使用本地演示结果保证页面可继续预览。
+启动后在浏览器中打开 Streamlit 提供的本地地址，上传 JPG 或 PNG 图像，然后点击“开始 AI 分析”即可体验完整流程。当前页面默认调用千问 AI 图像分析；没有配置 `DASHSCOPE_API_KEY` 时，真实分析无法使用，页面会提示错误原因且不会崩溃。
 
 ## 当前功能
 
@@ -91,13 +93,27 @@ streamlit run app.py
 - 显示图像预览、宽度、高度和文件格式。
 - 上传图片后点击“开始 AI 分析”即可调用千问图像理解。
 - Agent 会自动识别图像类型，选择分析路径，并给出路径选择原因和下一步建议。
+- 对细胞显微图像或荧光显微图像，可运行基础 Otsu 阈值分割与连通域面积统计。
 - 千问 AI 分析使用细胞显微图像和科研实验图像的图像理解 Prompt，返回结构化 JSON。
 - 输出图像概述、可见结构、疑似异常区域、图像质量说明、建议分析指标和局限性。
 - 如果没有配置 `DASHSCOPE_API_KEY`，或网络、模型名称、API 调用异常，真实分析无法使用。
 - 支持用户输入追问，并基于 `knowledge_base/` 本地 markdown 知识库进行关键词检索回答。
 - 点击“生成实验报告”后输出 Markdown 报告。
 - 支持下载 Markdown 报告。
+- 如果运行了基础分割统计，Markdown 报告会追加基础分割与面积统计结果。
+- V1.3 支持下载完整分析结果 JSON、分割 mask PNG 和面积统计 CSV。
 - 所有关键输出均提示：仅用于科研辅助分析，不构成医学诊断。
+
+## 结果导出
+
+V1.3 增强了报告导出与分析结果归档：
+
+- 支持下载 Markdown 实验报告。
+- 支持下载基础分割 mask 图。
+- 支持下载面积统计 CSV，包含每个目标面积和 summary 统计。
+- 支持下载完整分析结果 JSON，包含图像分析结果、追问记录和可选分割统计。
+
+运行中生成的归档文件会保存到 `outputs/` 目录。该目录用于本地运行结果缓存，具体实验输出文件不会提交到 GitHub；仓库只保留 `outputs/.gitkeep`。
 
 ## 追问示例
 

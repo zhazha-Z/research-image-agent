@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Any, Dict, List
+
+from PIL import Image
 
 from services.metrics_service import explain_metrics_by_mode
 from services.mock_analysis import DISCLAIMER
@@ -31,6 +34,11 @@ def run_image_analysis_agent(uploaded_file: Any) -> Dict[str, Any]:
     suggested_metrics = _as_list(qwen_data.get("suggested_metrics"))
     metric_explanations = explain_metrics_by_mode(metric_mode, suggested_metrics)
     analysis_path = _select_analysis_path(image_type, metric_mode)
+    can_run_segmentation = _can_run_segmentation(image_type, analysis_path)
+    segmentation_recommended_reason = _build_segmentation_recommendation_reason(
+        image_type,
+        can_run_segmentation,
+    )
 
     agent_decision = {
         "image_type": image_type,
@@ -39,15 +47,22 @@ def run_image_analysis_agent(uploaded_file: Any) -> Dict[str, Any]:
         "reason": _build_decision_reason(image_type, analysis_focus, metric_mode),
         "next_steps": _build_next_steps(image_type, metric_mode),
     }
+    file_name = getattr(uploaded_file, "name", "uploaded_image")
+    image_size = _get_uploaded_image_size(uploaded_file)
+    quality_notes = _as_list(qwen_data.get("quality_notes"))
+    possible_abnormal_regions = _as_list(qwen_data.get("possible_abnormal_regions"))
 
     analysis_result = {
+        "analysis_mode": "千问 Agent 图像分析",
+        "file_name": file_name,
+        "image_size": image_size,
         "image_type": image_type,
         "image_type_confidence": image_type_confidence,
         "image_summary": _as_text(qwen_data.get("image_summary")) or "千问未返回图像整体描述。",
         "analysis_focus": analysis_focus,
         "visible_structures": _as_list(qwen_data.get("visible_structures")),
-        "possible_abnormal_regions": _as_list(qwen_data.get("possible_abnormal_regions")),
-        "quality_notes": _as_list(qwen_data.get("quality_notes")),
+        "possible_abnormal_regions": possible_abnormal_regions,
+        "quality_notes": quality_notes,
         "suggested_metrics": suggested_metrics,
         "metric_explanations": metric_explanations,
         "limitations": _as_list(qwen_data.get("limitations")),
@@ -55,7 +70,10 @@ def run_image_analysis_agent(uploaded_file: Any) -> Dict[str, Any]:
         "metric_explanation_mode": metric_mode,
         "agent_decision": agent_decision,
         "qwen_structured_result": qwen_data,
+        "can_run_segmentation": can_run_segmentation,
+        "segmentation_recommended_reason": segmentation_recommended_reason,
     }
+    analysis_result.update(_to_ui_fields(analysis_result))
 
     return {
         "success": True,
@@ -102,10 +120,15 @@ def run_qa_agent(
 def run_report_agent(
     analysis_result: Dict[str, object],
     chat_history: List[Dict[str, str]] | None = None,
+    segmentation_result: Dict[str, object] | None = None,
 ) -> Dict[str, object]:
     """Generate a markdown report through the Agent orchestration layer."""
     try:
-        markdown = generate_markdown_report(analysis_result, chat_history=chat_history)
+        markdown = generate_markdown_report(
+            analysis_result,
+            chat_history=chat_history,
+            segmentation_result=segmentation_result,
+        )
         return {
             "success": True,
             "report_markdown": markdown,
@@ -175,6 +198,44 @@ def agent_result_to_app_result(
     }
 
 
+def _to_ui_fields(agent_data: Dict[str, Any]) -> Dict[str, Any]:
+    quality_notes = _as_list(agent_data.get("quality_notes"))
+    metric_explanations = _as_list_of_dicts(agent_data.get("metric_explanations"))
+    if not metric_explanations:
+        metric_explanations = explain_metrics_by_mode(
+            _normalize_metric_mode(_as_text(agent_data.get("metric_explanation_mode"))),
+            _as_list(agent_data.get("suggested_metrics")),
+        )
+
+    return {
+        "image_quality": "\n".join(quality_notes) if quality_notes else "Agent 未返回图像质量说明。",
+        "overview": agent_data.get("image_summary", "Agent 未返回图像概述。"),
+        "abnormal_regions": [
+            {
+                "region": f"疑似区域 {index}",
+                "description": description,
+                "confidence": "需人工复核",
+            }
+            for index, description in enumerate(
+                _as_list(agent_data.get("possible_abnormal_regions")),
+                start=1,
+            )
+        ],
+        "segmentation_summary": _build_display_summary(agent_data),
+        "metrics": [
+            {
+                "name": item.get("metric", "建议指标"),
+                "value": None,
+                "explanation": item.get("explanation", "该指标需要结合具体图像和实验任务解释。"),
+                "interpretation": item.get("explanation", "该指标需要结合具体图像和实验任务解释。"),
+            }
+            for item in metric_explanations
+        ],
+        "metric_explanations": metric_explanations,
+        "disclaimer": agent_data.get("safety_note") or DISCLAIMER,
+    }
+
+
 def _infer_image_type(qwen_data: Dict[str, Any]) -> str:
     combined = " ".join(
         [
@@ -184,13 +245,13 @@ def _infer_image_type(qwen_data: Dict[str, Any]) -> str:
         ]
     ).lower()
     if any(keyword in combined for keyword in ["loss", "accuracy", "曲线", "epoch", "训练"]):
-        return "loss 曲线图"
+        return "loss_curve"
     if any(keyword in combined for keyword in ["mask", "segmentation", "分割", "轮廓"]):
-        return "分割结果图"
+        return "segmentation_result"
     if any(keyword in combined for keyword in ["fluorescence", "荧光"]):
-        return "荧光显微图像"
+        return "fluorescence_microscopy"
     if any(keyword in combined for keyword in ["cell", "细胞", "显微"]):
-        return "细胞显微图像"
+        return "cell_microscopy"
     return "科研实验图像"
 
 
@@ -199,9 +260,9 @@ def _infer_analysis_focus(image_type: str, qwen_data: Dict[str, Any]) -> List[st
         return ["训练趋势", "收敛情况", "过拟合风险"]
     if "分割" in image_type:
         return ["分割边界", "mask 重叠", "漏分割与过分割风险"]
-    if "荧光" in image_type:
+    if "荧光" in image_type or "fluorescence" in image_type.lower():
         return ["荧光强度", "背景噪声", "信噪比"]
-    if "细胞" in image_type:
+    if "细胞" in image_type or "cell" in image_type.lower():
         return ["可见细胞结构", "细胞表型", "图像质量"]
     metrics = _as_list(qwen_data.get("suggested_metrics"))
     return metrics or ["图像内容识别", "质量评估", "后续分析建议"]
@@ -242,7 +303,7 @@ def _select_analysis_path(image_type: str, metric_mode: str) -> str:
         return "fluorescence_quantification"
     if metric_mode == "phenotype":
         return "cell_quantification"
-    if "细胞" in image_type:
+    if "细胞" in image_type or "cell" in image_type.lower():
         return "cell_quantification"
     return "general_quality_review"
 
@@ -267,6 +328,27 @@ def _build_next_steps(image_type: str, metric_mode: str) -> str:
     return ["先进行人工复核、图像质量检查和任务目标确认。", "再选择合适的定量指标。"]
 
 
+def _can_run_segmentation(image_type: str, analysis_path: str) -> bool:
+    normalized = image_type.lower()
+    if normalized in {"cell_microscopy", "fluorescence_microscopy"}:
+        return True
+    if any(keyword in image_type for keyword in ["细胞显微", "荧光显微"]):
+        return True
+    return analysis_path in {"cell_quantification", "fluorescence_quantification"}
+
+
+def _build_segmentation_recommendation_reason(image_type: str, can_run_segmentation: bool) -> str:
+    if can_run_segmentation:
+        return (
+            f"Agent 将图像类型判断为“{image_type}”，可尝试基础阈值分割进行目标数量和面积的初步统计。"
+            "该结果只适合作为预览，需要人工标注或专业模型进一步验证。"
+        )
+    return (
+        f"Agent 将图像类型判断为“{image_type}”，当前图像类型不适合进行细胞分割统计。"
+        "loss 曲线、实验图表、方法示意图、热图或其他非显微目标图像不建议运行该基础分割。"
+    )
+
+
 def _build_display_summary(agent_data: Dict[str, Any]) -> str:
     decision = agent_data.get("agent_decision", {})
     analysis_path = decision.get("analysis_path", "通用科研图像质量与结构分析路径")
@@ -274,6 +356,14 @@ def _build_display_summary(agent_data: Dict[str, Any]) -> str:
         f"Agent 已选择“{analysis_path}”。当前阶段只进行图像理解、路径选择和指标解释，"
         "不执行真实分割、不计算真实分割指标。"
     )
+
+
+def _get_uploaded_image_size(uploaded_file: Any) -> str:
+    try:
+        image = Image.open(BytesIO(uploaded_file.getvalue()))
+        return f"{image.width} x {image.height}px"
+    except Exception:
+        return "未知尺寸"
 
 
 def _as_text(value: Any) -> str:
